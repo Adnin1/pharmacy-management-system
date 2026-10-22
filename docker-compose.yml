@@ -1,0 +1,11 @@
+services:
+  pharmacy-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pharmacy-management-system
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
