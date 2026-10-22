@@ -225,11 +225,14 @@ export interface PharmacySettings {
   address: string;
   email: string;
   tradeLicenseNo: string;
+  drugLicenseNo?: string;
   vatRegNo: string;
   currency: string;
   defaultVatRate: number;
   invoiceFooterMsg: string;
   lowStockThresholdDays: number;
+  receiptPrintFormat?: '80mm' | '58mm' | 'a4';
+  enableDrugInteractionAlerts?: boolean;
 }
 
 export type UserRole = 'admin' | 'pharmacist' | 'cashier';
@@ -240,4 +243,100 @@ export interface User {
   username: string;
   role: UserRole;
   email: string;
+}
+
+// ===================== CLINICAL CDSS & DRUG INTERACTIONS =====================
+export interface DrugInteraction {
+  id: string;
+  drugs: [string, string];
+  severity: 'major' | 'moderate' | 'minor';
+  description: string;
+  management: string;
+}
+
+// ===================== POS SALES RETURN & REFUNDS =====================
+export interface ReturnItem {
+  medicineId: string;
+  medicineName: string;
+  genericName: string;
+  batchId: string;
+  batchNumber: string;
+  quantity: number;
+  unitPrice: number;
+  totalRefund: number;
+  reason: string;
+}
+
+export interface SaleReturn {
+  id: string;
+  returnInvoiceNumber: string;
+  originalSaleId: string;
+  originalInvoiceNumber: string;
+  createdAt: string;
+  customerId?: string;
+  customerName: string;
+  customerPhone?: string;
+  items: ReturnItem[];
+  totalRefundAmount: number;
+  refundMethod: 'cash' | 'credit_note' | 'bkash' | 'nagad';
+  cashierName: string;
+  notes?: string;
+}
+
+// ===================== CASH DRAWER SHIFT & Z-REPORT =====================
+export interface CashShift {
+  id: string;
+  shiftNumber: string;
+  openedAt: string;
+  closedAt?: string;
+  cashierName: string;
+  openingFloat: number;
+  cashSales: number;
+  cashRefunds: number;
+  expectedCash: number;
+  actualCashCounted?: number;
+  discrepancy?: number;
+  status: 'open' | 'closed';
+  notes?: string;
+}
+
+// ===================== DAMAGE, WASTE & COMPANY RETURN CLAIMS =====================
+export interface DamageWasteItem {
+  id: string;
+  medicineId: string;
+  medicineName: string;
+  genericName: string;
+  batchId: string;
+  batchNumber: string;
+  expiryDate: string;
+  quantity: number;
+  unitCost: number;
+  totalLoss: number;
+  reason: 'expired' | 'damaged' | 'broken' | 'recalled';
+  action: 'discarded' | 'returned_to_company';
+  supplierId?: string;
+  supplierName?: string;
+  challanNumber?: string;
+  reportedAt: string;
+  reportedBy: string;
+}
+
+// ===================== PRESCRIPTION CLINICAL REGISTER =====================
+export interface PrescriptionRecord {
+  id: string;
+  rxNumber: string;
+  patientName: string;
+  patientAge: number;
+  patientGender: 'Male' | 'Female' | 'Other';
+  patientPhone: string;
+  doctorName: string;
+  doctorBmdc: string;
+  hospitalOrChamber: string;
+  diagnosis: string;
+  prescribedMedicines: string[];
+  hasAntibiotics: boolean;
+  hasNarcotics: boolean;
+  registeredAt: string;
+  registeredBy: string;
+  imageUrl?: string;
 }

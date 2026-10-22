@@ -250,4 +250,200 @@ describe('Pharmacy Management System - Core Database Engine & FEFO Invariants', 
     const duplicateImport = db.importBulkMedicines(bulkPayload);
     expect(duplicateImport).toBe(0);
   });
+
+  it('processes Customer Sales Return, restocks inventory batch, and issues refund', () => {
+    const napa = db.getMedicineById('med-1')!;
+    const batch = db.getBatchesForMedicine('med-1')[0];
+    const initialBatchStock = batch.quantityInStock;
+
+    // 1. Make initial sale of 10 pieces
+    const sale = db.processSale({
+      cartItems: [
+        {
+          medicine: napa,
+          batch,
+          quantity: 10,
+          unitType: 'piece',
+          unitPrice: batch.sellingPrice,
+          costPrice: batch.purchasePrice,
+          discountPercent: 0,
+          total: 10 * batch.sellingPrice,
+        },
+      ],
+      discountAmount: 0,
+      vatPercent: 0,
+      paymentMethod: 'cash',
+      paidAmount: 10 * batch.sellingPrice,
+      cashierName: 'Adnin Sadat',
+    });
+
+    const stockAfterSale = db.getBatchesForMedicine('med-1', true).find((b) => b.id === batch.id)!.quantityInStock;
+    expect(stockAfterSale).toBe(initialBatchStock - 10);
+
+    // 2. Process return of 4 pieces
+    const saleReturn = db.processSaleReturn({
+      originalSaleId: sale.id,
+      originalInvoiceNumber: sale.invoiceNumber,
+      customerName: 'Return Customer',
+      items: [
+        {
+          medicineId: napa.id,
+          medicineName: napa.name,
+          genericName: napa.genericName,
+          batchId: batch.id,
+          batchNumber: batch.batchNumber,
+          quantity: 4,
+          unitPrice: batch.sellingPrice,
+          totalRefund: 4 * batch.sellingPrice,
+          reason: 'Doctor changed prescription',
+        },
+      ],
+      refundMethod: 'cash',
+      cashierName: 'On-Duty Pharmacist',
+    });
+
+    expect(saleReturn).toBeDefined();
+    expect(saleReturn.returnInvoiceNumber).toMatch(/^RET-/);
+    expect(saleReturn.totalRefundAmount).toBe(4 * batch.sellingPrice);
+
+    // 3. Verify batch was restocked by 4 units
+    const stockAfterReturn = db.getBatchesForMedicine('med-1', true).find((b) => b.id === batch.id)!.quantityInStock;
+    expect(stockAfterReturn).toBe(stockAfterSale + 4);
+  });
+
+  it('reduces customer due balance when return refundMethod is credit_note', () => {
+    const customer = db.getCustomers()[0];
+    const napa = db.getMedicineById('med-1')!;
+    const batch = db.getBatchesForMedicine('med-1')[0];
+
+    // Create due sale
+    const sale = db.processSale({
+      cartItems: [
+        {
+          medicine: napa,
+          batch,
+          quantity: 10,
+          unitType: 'piece',
+          unitPrice: batch.sellingPrice,
+          costPrice: batch.purchasePrice,
+          discountPercent: 0,
+          total: 10 * batch.sellingPrice,
+        },
+      ],
+      customer,
+      discountAmount: 0,
+      vatPercent: 0,
+      paymentMethod: 'due',
+      paidAmount: 0,
+      cashierName: 'Adnin Sadat',
+    });
+
+    const dueAfterSale = db.getCustomers().find((c) => c.id === customer.id)!.dueBalance;
+    const returnVal = 5 * batch.sellingPrice;
+
+    // Return with credit note
+    db.processSaleReturn({
+      originalSaleId: sale.id,
+      originalInvoiceNumber: sale.invoiceNumber,
+      customerId: customer.id,
+      customerName: customer.name,
+      items: [
+        {
+          medicineId: napa.id,
+          medicineName: napa.name,
+          genericName: napa.genericName,
+          batchId: batch.id,
+          batchNumber: batch.batchNumber,
+          quantity: 5,
+          unitPrice: batch.sellingPrice,
+          totalRefund: returnVal,
+          reason: 'Excess medicine',
+        },
+      ],
+      refundMethod: 'credit_note',
+      cashierName: 'Adnin Sadat',
+    });
+
+    const dueAfterReturn = db.getCustomers().find((c) => c.id === customer.id)!.dueBalance;
+    expect(dueAfterReturn).toBe(dueAfterSale - returnVal);
+  });
+
+  it('manages Cash Drawer Shifts and computes Z-Report discrepancy', () => {
+    // 1. Open shift with float of 1500
+    const shift = db.openCashShift('Adnin Sadat', 1500);
+    expect(shift.status).toBe('open');
+    expect(shift.openingFloat).toBe(1500);
+    expect(shift.expectedCash).toBe(1500);
+
+    // 2. Perform a cash sale
+    const napa = db.getMedicineById('med-1')!;
+    const batch = db.getBatchesForMedicine('med-1')[0];
+    db.processSale({
+      cartItems: [
+        {
+          medicine: napa,
+          batch,
+          quantity: 10,
+          unitType: 'piece',
+          unitPrice: batch.sellingPrice,
+          costPrice: batch.purchasePrice,
+          discountPercent: 0,
+          total: 10 * batch.sellingPrice,
+        },
+      ],
+      discountAmount: 0,
+      vatPercent: 0,
+      paymentMethod: 'cash',
+      paidAmount: 10 * batch.sellingPrice,
+      cashierName: 'Adnin Sadat',
+    });
+
+    // Verify expected cash increased by sale amount
+    const active = db.getCurrentOpenShift()!;
+    const expectedWithSale = 1500 + 10 * batch.sellingPrice;
+    expect(active.expectedCash).toBe(expectedWithSale);
+
+    // 3. Close shift with physical count (with slight discrepancy)
+    const counted = expectedWithSale - 20; // 20 taka short
+    const closed = db.closeCashShift(counted, 'Minor coin change shortage');
+    expect(closed).toBeDefined();
+    expect(closed?.status).toBe('closed');
+    expect(closed?.actualCashCounted).toBe(counted);
+    expect(closed?.discrepancy).toBe(-20);
+    expect(db.getCurrentOpenShift()).toBeNull();
+  });
+
+  it('records Damage / Waste write-offs and company return claims', () => {
+    const napa = db.getMedicineById('med-1')!;
+    const batch = db.getBatchesForMedicine('med-1')[0];
+    const initialStock = batch.quantityInStock;
+
+    const record = db.recordDamageWaste({
+      medicineId: napa.id,
+      medicineName: napa.name,
+      genericName: napa.genericName,
+      batchId: batch.id,
+      batchNumber: batch.batchNumber,
+      expiryDate: batch.expiryDate,
+      quantity: 15,
+      unitCost: batch.purchasePrice,
+      totalLoss: 15 * batch.purchasePrice,
+      reason: 'expired',
+      action: 'returned_to_company',
+      supplierName: 'Square Pharmaceuticals Ltd.',
+      challanNumber: 'CHL-998822',
+      reportedBy: 'Pharmacist Tester',
+    });
+
+    expect(record).toBeDefined();
+    expect(record.id).toMatch(/^dam-/);
+
+    // Verify batch stock was deducted
+    const remaining = db.getBatchesForMedicine('med-1', true).find((b) => b.id === batch.id)!.quantityInStock;
+    expect(remaining).toBe(initialStock - 15);
+
+    // Verify record appears in damage waste list
+    const list = db.getDamageWasteRecords();
+    expect(list.some((r) => r.id === record.id)).toBe(true);
+  });
 });

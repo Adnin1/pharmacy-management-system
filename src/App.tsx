@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import type { UserRole, PharmacySettings } from './types/pharmacy';
+import type { UserRole, PharmacySettings, CashShift } from './types/pharmacy';
 import { db } from './services/db';
 import { Navbar, type NavTab } from './components/Navbar';
 import { POSView } from './components/POSView';
@@ -9,8 +9,10 @@ import { PrescriptionView } from './components/PrescriptionView';
 import { CustomersView } from './components/CustomersView';
 import { SuppliersView } from './components/SuppliersView';
 import { ReportsView } from './components/ReportsView';
+import { ReturnsView } from './components/ReturnsView';
 import { AuditLogsView } from './components/AuditLogsView';
 import { SettingsView } from './components/SettingsView';
+import { ShiftManagementModal } from './components/ShiftManagementModal';
 
 export function App() {
   const [currentTab, setCurrentTab] = useState<NavTab>('pos');
@@ -19,12 +21,15 @@ export function App() {
   const [lowStockCount, setLowStockCount] = useState<number>(0);
   const [expiringCount, setExpiringCount] = useState<number>(0);
   const [totalMedicinesCount, setTotalMedicinesCount] = useState<number>(0);
+  const [openShift, setOpenShift] = useState<CashShift | null>(null);
+  const [isShiftModalOpen, setIsShiftModalOpen] = useState<boolean>(false);
 
   // Compute live badges
   const computeAlerts = () => {
     const meds = db.getMedicines();
     const batches = db.getBatches();
     setTotalMedicinesCount(meds.length);
+    setOpenShift(db.getCurrentOpenShift());
 
     // Low stock
     const low = meds.filter((m) => {
@@ -76,6 +81,9 @@ export function App() {
       } else if (e.key === 'F7') {
         e.preventDefault();
         setCurrentTab('reports');
+      } else if (e.key === 'F8') {
+        e.preventDefault();
+        setCurrentTab('returns');
       }
     };
 
@@ -97,12 +105,19 @@ export function App() {
         lowStockCount={lowStockCount}
         expiringCount={expiringCount}
         totalMedicinesCount={totalMedicinesCount}
+        openShift={openShift}
+        onOpenShiftModal={() => setIsShiftModalOpen(true)}
       />
 
       {/* Main Workspace Body */}
       <main className="flex-1 pb-10">
         {currentTab === 'pos' && (
-          <POSView settings={settings} cashierName={cashierName} />
+          <POSView 
+            settings={settings} 
+            cashierName={cashierName}
+            onOpenShiftModal={() => setIsShiftModalOpen(true)}
+            onNavigateToReturns={() => setCurrentTab('returns')}
+          />
         )}
         {currentTab === 'inventory' && (
           <InventoryView settings={settings} />
@@ -122,6 +137,9 @@ export function App() {
         {currentTab === 'reports' && (
           <ReportsView settings={settings} />
         )}
+        {currentTab === 'returns' && (
+          <ReturnsView settings={settings} />
+        )}
         {currentTab === 'audit' && (
           <AuditLogsView settings={settings} />
         )}
@@ -129,6 +147,14 @@ export function App() {
           <SettingsView settings={settings} onUpdateSettings={setSettings} />
         )}
       </main>
+
+      {/* Shift & Cash Register Modal */}
+      <ShiftManagementModal
+        isOpen={isShiftModalOpen}
+        onClose={() => setIsShiftModalOpen(false)}
+        settings={settings}
+        cashierName={cashierName}
+      />
     </div>
   );
 }

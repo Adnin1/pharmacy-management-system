@@ -15,9 +15,11 @@ import {
   Maximize2,
   Minimize2,
   UserCheck,
-  Database
+  Database,
+  RotateCcw,
+  DollarSign
 } from 'lucide-react';
-import type { UserRole, PharmacySettings } from '../types/pharmacy';
+import type { UserRole, PharmacySettings, CashShift } from '../types/pharmacy';
 
 export type NavTab = 
   | 'pos' 
@@ -27,6 +29,7 @@ export type NavTab =
   | 'customers' 
   | 'suppliers' 
   | 'reports' 
+  | 'returns'
   | 'audit' 
   | 'settings';
 
@@ -39,6 +42,8 @@ interface NavbarProps {
   lowStockCount: number;
   expiringCount: number;
   totalMedicinesCount: number;
+  openShift?: CashShift | null;
+  onOpenShiftModal?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -50,6 +55,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   lowStockCount,
   expiringCount,
   totalMedicinesCount,
+  openShift,
+  onOpenShiftModal,
 }) => {
   const [time, setTime] = useState<string>('');
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -86,6 +93,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'customers', label: 'Customers & Due', icon: <Users className="w-4 h-4" />, shortcut: 'F5' },
     { id: 'suppliers', label: 'Procurement', icon: <Truck className="w-4 h-4" />, shortcut: 'F6' },
     { id: 'reports', label: 'Analytics', icon: <BarChart3 className="w-4 h-4" />, shortcut: 'F7' },
+    { id: 'returns', label: 'Returns & Claims', icon: <RotateCcw className="w-4 h-4" />, shortcut: 'F8' },
     { id: 'audit', label: 'Audit Logs', icon: <ShieldAlert className="w-4 h-4" /> },
     { id: 'settings', label: 'Settings', icon: <Settings className="w-4 h-4" /> },
   ];
@@ -126,6 +134,22 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <Database className="w-3.5 h-3.5 text-indigo-400" />
               <span>{totalMedicinesCount} Meds (35,000+ Ready)</span>
+            </button>
+          )}
+
+          {/* Cash Drawer Shift Indicator */}
+          {onOpenShiftModal && (
+            <button
+              onClick={onOpenShiftModal}
+              title={openShift ? `Shift ${openShift.shiftNumber} Open` : 'Click to Open Shift Register'}
+              className={`hidden md:inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full border text-xs font-semibold transition-all cursor-pointer ${
+                openShift
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
+                  : 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
+              }`}
+            >
+              <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
+              <span>{openShift ? `Shift: ${openShift.shiftNumber}` : 'Open Register'}</span>
             </button>
           )}
 

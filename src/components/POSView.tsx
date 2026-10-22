@@ -5,14 +5,16 @@ import type {
   Doctor, 
   CartItem, 
   PaymentMethod, 
-  PharmacySettings,
-  Sale,
-  SpecialSegment,
-  HeldSale
+  PharmacySettings, 
+  Sale, 
+  SpecialSegment, 
+  HeldSale,
+  CashShift
 } from '../types/pharmacy';
 import { db } from '../services/db';
 import { sound } from '../utils/audio';
 import { ReceiptModal } from './ReceiptModal';
+import { checkDrugInteractions } from '../services/clinicalRules';
 import confetti from 'canvas-confetti';
 import { 
   Search, 
@@ -25,20 +27,30 @@ import {
   Banknote, 
   Smartphone, 
   AlertCircle, 
+  AlertTriangle,
   Receipt, 
   FileCheck, 
   Tag, 
   PauseCircle, 
   PlayCircle, 
-  ThermometerSnowflake
+  ThermometerSnowflake,
+  RotateCcw,
+  DollarSign
 } from 'lucide-react';
 
 interface POSViewProps {
   settings: PharmacySettings;
   cashierName: string;
+  onOpenShiftModal?: () => void;
+  onNavigateToReturns?: () => void;
 }
 
-export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
+export const POSView: React.FC<POSViewProps> = ({ 
+  settings, 
+  cashierName,
+  onOpenShiftModal,
+  onNavigateToReturns,
+}) => {
   const [medicines, setMedicines] = useState<Medicine[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [doctors, setDoctors] = useState<Doctor[]>([]);
@@ -64,6 +76,7 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
   
   // Completed sale receipt
   const [completedSale, setCompletedSale] = useState<Sale | null>(null);
+  const [currentShift, setCurrentShift] = useState<CashShift | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -73,6 +86,7 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     setCustomers(db.getCustomers());
     setDoctors(db.getDoctors());
     setHeldSales(db.getHeldSales());
+    setCurrentShift(db.getCurrentOpenShift());
   };
 
   useEffect(() => {
@@ -208,16 +222,14 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     });
   };
 
-  const toggleUnitType = (index: number) => {
+  const setCartItemUnitType = (index: number, newType: 'piece' | 'strip' | 'box') => {
     setCart((prevCart) => {
       const updated = [...prevCart];
       const item = updated[index];
-      const isBox = item.unitType === 'box';
-      const newType = isBox ? 'piece' : 'box';
-      const factor = item.medicine.unitsPerBox > 1 ? item.medicine.unitsPerBox : 1;
-      const unitPrice = isBox
-        ? item.batch.sellingPrice
-        : item.batch.sellingPrice * factor;
+      const unitsPerBox = item.medicine.unitsPerBox > 1 ? item.medicine.unitsPerBox : 1;
+      const stripUnits = item.medicine.unitsPerBox >= 10 ? 10 : 1;
+      const multiplier = newType === 'box' ? unitsPerBox : (newType === 'strip' ? stripUnits : 1);
+      const unitPrice = item.batch.sellingPrice * multiplier;
 
       const total = (item.quantity * unitPrice * (100 - item.discountPercent)) / 100;
       updated[index] = {
@@ -229,6 +241,18 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
       return updated;
     });
   };
+
+  // Clinical CDSS Drug-Drug Interaction detection
+  const interactions = useMemo(() => {
+    if (settings.enableDrugInteractionAlerts === false) return [];
+    return checkDrugInteractions(
+      cart.map((item) => ({
+        id: item.medicine.id,
+        name: item.medicine.name,
+        genericName: item.medicine.genericName,
+      }))
+    );
+  }, [cart, settings.enableDrugInteractionAlerts]);
 
   const removeFromCart = (index: number) => {
     setCart((prev) => prev.filter((_, i) => i !== index));
@@ -486,6 +510,35 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
         <div className="bg-white rounded-2xl shadow-sm border border-slate-200/90 overflow-hidden flex flex-col h-[calc(100vh-120px)]">
           {/* Header Customer, Doctor & Held Orders Selector */}
           <div className="p-3.5 bg-slate-50 border-b border-slate-200 space-y-2.5">
+            {/* Shift Status & Quick Returns Header Bar */}
+            <div className="flex items-center justify-between text-xs pb-1 border-b border-slate-200/60">
+              <button
+                type="button"
+                onClick={onOpenShiftModal}
+                className="flex items-center space-x-1.5 px-2 py-0.5 rounded-lg bg-white border border-slate-200 hover:border-slate-300 text-[11px] font-semibold text-slate-700 transition-all cursor-pointer"
+              >
+                <DollarSign className="w-3.5 h-3.5 text-emerald-600" />
+                {currentShift ? (
+                  <span>
+                    Shift <strong className="font-mono text-emerald-700">{currentShift.shiftNumber}</strong> (৳{currentShift.expectedCash.toFixed(0)})
+                  </span>
+                ) : (
+                  <span className="text-amber-700 font-bold">Register Closed • Open Float</span>
+                )}
+              </button>
+
+              {onNavigateToReturns && (
+                <button
+                  type="button"
+                  onClick={onNavigateToReturns}
+                  className="flex items-center space-x-1 text-rose-600 hover:text-rose-700 font-bold text-[11px] hover:underline cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Sales Return & Claims</span>
+                </button>
+              )}
+            </div>
+
             {/* Customer Picker & Recall Button */}
             <div className="flex items-center space-x-2">
               <div className="flex-1">
@@ -582,14 +635,46 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
                             ))}
                           </select>
 
-                          {item.medicine.unitsPerBox > 1 && (
+                          {/* 3-Way Unit Selector: Pcs | Strip (10s) | Box */}
+                          <div className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5 text-[9px] font-bold">
                             <button
-                              onClick={() => toggleUnitType(idx)}
-                              className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 uppercase cursor-pointer"
+                              type="button"
+                              onClick={() => setCartItemUnitType(idx, 'piece')}
+                              className={`px-1.5 py-0.5 rounded transition-all cursor-pointer ${
+                                item.unitType === 'piece'
+                                  ? 'bg-emerald-600 text-white shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
                             >
-                              {item.unitType} ({item.medicine.unitsPerBox}/box)
+                              Pcs
                             </button>
-                          )}
+                            {item.medicine.unitsPerBox >= 10 && (
+                              <button
+                                type="button"
+                                onClick={() => setCartItemUnitType(idx, 'strip')}
+                                className={`px-1.5 py-0.5 rounded transition-all cursor-pointer ${
+                                  item.unitType === 'strip'
+                                    ? 'bg-emerald-600 text-white shadow-xs'
+                                    : 'text-slate-600 hover:text-slate-900'
+                                }`}
+                              >
+                                Strip (10s)
+                              </button>
+                            )}
+                            {item.medicine.unitsPerBox > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => setCartItemUnitType(idx, 'box')}
+                                className={`px-1.5 py-0.5 rounded transition-all cursor-pointer ${
+                                  item.unitType === 'box'
+                                    ? 'bg-emerald-600 text-white shadow-xs'
+                                    : 'text-slate-600 hover:text-slate-900'
+                                }`}
+                              >
+                                Box ({item.medicine.unitsPerBox})
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
 
@@ -638,6 +723,45 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
               })
             )}
           </div>
+
+          {/* Clinical CDSS Drug-Drug Interaction Warning Alert Banner */}
+          {interactions.length > 0 && (
+            <div className="p-3 bg-rose-50 border-t border-rose-200 space-y-2">
+              <div className="flex items-center space-x-1.5 text-rose-800">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span className="font-bold text-xs uppercase tracking-tight">
+                  Clinical Alert: {interactions.length} Severe Drug Interaction(s)
+                </span>
+              </div>
+              <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                {interactions.map((inter) => (
+                  <div
+                    key={inter.id}
+                    className="p-2 bg-white rounded-lg border border-rose-200 text-[10px] space-y-1 shadow-xs"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-900">{inter.drugs[0]} + {inter.drugs[1]}</span>
+                      <span
+                        className={`px-1.5 py-0.2 rounded text-[9px] font-black uppercase ${
+                          inter.severity === 'major'
+                            ? 'bg-rose-100 text-rose-800'
+                            : inter.severity === 'moderate'
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-blue-100 text-blue-800'
+                        }`}
+                      >
+                        {inter.severity} Risk
+                      </span>
+                    </div>
+                    <p className="text-slate-700 leading-tight">{inter.description}</p>
+                    <p className="text-emerald-800 font-semibold leading-tight">
+                      💡 Rx Advice: {inter.management}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Cart Footer: Financial Calculations & Checkout */}
           <div className="p-3.5 bg-slate-50 border-t border-slate-200 space-y-2">

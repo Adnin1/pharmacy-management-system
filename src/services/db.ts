@@ -9,7 +9,12 @@ import type {
   PharmacySettings, 
   AuditLog,
   CartItem,
-  HeldSale
+  HeldSale,
+  SaleReturn,
+  ReturnItem,
+  CashShift,
+  DamageWasteItem,
+  PrescriptionRecord
 } from '../types/pharmacy';
 import { 
   initialMedicines, 
@@ -33,6 +38,10 @@ const STORAGE_KEYS = {
   PURCHASES: 'pms_purchases_v2',
   SETTINGS: 'pms_settings_v2',
   AUDIT_LOGS: 'pms_audit_logs_v2',
+  RETURNS: 'pms_returns_v2',
+  SHIFTS: 'pms_shifts_v2',
+  DAMAGE_WASTE: 'pms_damage_waste_v2',
+  PRESCRIPTIONS: 'pms_prescriptions_v2',
 };
 
 type Listener = () => void;
@@ -449,10 +458,15 @@ class DatabaseService {
   }): Sale {
     const batches = this.getBatches();
     const saleItems = params.cartItems.map((item) => {
-      // Find batch and decrement quantity
+      // Find batch and decrement quantity considering unitType
       const bIdx = batches.findIndex((b) => b.id === item.batch.id);
+      const unitsPerBox = item.medicine.unitsPerBox > 1 ? item.medicine.unitsPerBox : 1;
+      const stripUnits = item.medicine.unitsPerBox >= 10 ? 10 : 1;
+      const multiplier = item.unitType === 'box' ? unitsPerBox : (item.unitType === 'strip' ? stripUnits : 1);
+      const unitsToDeduct = item.quantity * multiplier;
+
       if (bIdx !== -1) {
-        const remaining = Math.max(0, batches[bIdx].quantityInStock - item.quantity);
+        const remaining = Math.max(0, batches[bIdx].quantityInStock - unitsToDeduct);
         batches[bIdx].quantityInStock = remaining;
         if (remaining === 0) {
           batches[bIdx].status = 'depleted';
@@ -552,6 +566,17 @@ class DatabaseService {
       if (dIdx !== -1) {
         doctors[dIdx].prescriptionCount += 1;
         this.save(STORAGE_KEYS.DOCTORS, doctors);
+      }
+    }
+
+    // Record cash in active open shift if applicable
+    if (params.paymentMethod === 'cash' && newSale.paidAmount > 0) {
+      const shifts = this.getCashShifts();
+      const openShift = shifts.find((s) => s.status === 'open');
+      if (openShift) {
+        openShift.cashSales += newSale.paidAmount;
+        openShift.expectedCash += newSale.paidAmount;
+        this.save(STORAGE_KEYS.SHIFTS, shifts);
       }
     }
 
@@ -700,6 +725,222 @@ class DatabaseService {
     this.save(STORAGE_KEYS.AUDIT_LOGS, logs);
   }
 
+  // ===================== SALES RETURNS & REFUNDS (ERP) =====================
+  getSaleReturns(): SaleReturn[] {
+    return this.load<SaleReturn[]>(STORAGE_KEYS.RETURNS, []);
+  }
+
+  processSaleReturn(params: {
+    originalSaleId: string;
+    originalInvoiceNumber: string;
+    customerId?: string;
+    customerName: string;
+    customerPhone?: string;
+    items: ReturnItem[];
+    refundMethod: 'cash' | 'credit_note' | 'bkash' | 'nagad';
+    cashierName: string;
+    notes?: string;
+  }): SaleReturn {
+    const returns = this.getSaleReturns();
+    const batches = this.getBatches();
+    const now = new Date().toISOString();
+    const returnInvoiceNumber = `RET-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    let totalRefundAmount = 0;
+
+    // Restock returned items to their respective batches
+    params.items.forEach((retItem) => {
+      totalRefundAmount += retItem.totalRefund;
+      const bIdx = batches.findIndex((b) => b.id === retItem.batchId);
+      if (bIdx !== -1) {
+        batches[bIdx].quantityInStock += retItem.quantity;
+        if (batches[bIdx].status === 'expired' && new Date(batches[bIdx].expiryDate) > new Date()) {
+          batches[bIdx].status = 'active';
+        }
+      }
+    });
+
+    const newReturn: SaleReturn = {
+      id: `return-${Date.now()}`,
+      returnInvoiceNumber,
+      originalSaleId: params.originalSaleId,
+      originalInvoiceNumber: params.originalInvoiceNumber,
+      createdAt: now,
+      customerId: params.customerId,
+      customerName: params.customerName,
+      customerPhone: params.customerPhone,
+      items: params.items,
+      totalRefundAmount,
+      refundMethod: params.refundMethod,
+      cashierName: params.cashierName,
+      notes: params.notes,
+    };
+
+    returns.unshift(newReturn);
+    this.save(STORAGE_KEYS.RETURNS, returns);
+    this.save(STORAGE_KEYS.BATCHES, batches);
+
+    // If refund was to customer credit/due balance, reduce due
+    if (params.customerId && params.refundMethod === 'credit_note') {
+      const customers = this.getCustomers();
+      const cIdx = customers.findIndex((c) => c.id === params.customerId);
+      if (cIdx !== -1) {
+        customers[cIdx].dueBalance = Math.max(0, customers[cIdx].dueBalance - totalRefundAmount);
+        this.save(STORAGE_KEYS.CUSTOMERS, customers);
+      }
+    }
+
+    // If refund was cash, deduct from current open shift
+    if (params.refundMethod === 'cash') {
+      const shifts = this.getCashShifts();
+      const openShift = shifts.find((s) => s.status === 'open');
+      if (openShift) {
+        openShift.cashRefunds += totalRefundAmount;
+        openShift.expectedCash = Math.max(0, openShift.expectedCash - totalRefundAmount);
+        this.save(STORAGE_KEYS.SHIFTS, shifts);
+      }
+    }
+
+    this.logAction(
+      'SALE_RETURN',
+      `Processed return ${returnInvoiceNumber} for invoice ${params.originalInvoiceNumber}. Total refund: ৳${totalRefundAmount.toFixed(2)}`
+    );
+
+    return newReturn;
+  }
+
+  // ===================== CASH DRAWER SHIFT & Z-REPORT (ERP) =====================
+  getCashShifts(): CashShift[] {
+    return this.load<CashShift[]>(STORAGE_KEYS.SHIFTS, []);
+  }
+
+  getCurrentOpenShift(): CashShift | null {
+    const shifts = this.getCashShifts();
+    return shifts.find((s) => s.status === 'open') || null;
+  }
+
+  openCashShift(cashierName: string, openingFloat: number): CashShift {
+    const shifts = this.getCashShifts();
+    shifts.forEach((s) => {
+      if (s.status === 'open') {
+        s.status = 'closed';
+        s.closedAt = new Date().toISOString();
+      }
+    });
+
+    const shiftNumber = `SFT-${Date.now().toString().slice(-6)}`;
+    const newShift: CashShift = {
+      id: `shift-${Date.now()}`,
+      shiftNumber,
+      openedAt: new Date().toISOString(),
+      cashierName,
+      openingFloat,
+      cashSales: 0,
+      cashRefunds: 0,
+      expectedCash: openingFloat,
+      status: 'open',
+    };
+
+    shifts.unshift(newShift);
+    this.save(STORAGE_KEYS.SHIFTS, shifts);
+    this.logAction('SHIFT_OPEN', `Shift ${shiftNumber} opened by ${cashierName} with float ৳${openingFloat.toFixed(2)}`);
+    return newShift;
+  }
+
+  closeCashShift(actualCashCounted: number, notes?: string): CashShift | null {
+    const shifts = this.getCashShifts();
+    const openIdx = shifts.findIndex((s) => s.status === 'open');
+    if (openIdx === -1) return null;
+
+    const shift = shifts[openIdx];
+    const shiftStart = new Date(shift.openedAt).getTime();
+    const sales = this.getSales();
+    const shiftCashSales = sales
+      .filter((s) => s.paymentMethod === 'cash' && new Date(s.createdAt).getTime() >= shiftStart)
+      .reduce((sum, s) => sum + s.paidAmount, 0);
+
+    const returns = this.getSaleReturns();
+    const shiftCashRefunds = returns
+      .filter((r) => r.refundMethod === 'cash' && new Date(r.createdAt).getTime() >= shiftStart)
+      .reduce((sum, r) => sum + r.totalRefundAmount, 0);
+
+    const expectedCash = shift.openingFloat + shiftCashSales - shiftCashRefunds;
+    const discrepancy = actualCashCounted - expectedCash;
+
+    const closedShift: CashShift = {
+      ...shift,
+      closedAt: new Date().toISOString(),
+      cashSales: shiftCashSales,
+      cashRefunds: shiftCashRefunds,
+      expectedCash,
+      actualCashCounted,
+      discrepancy,
+      status: 'closed',
+      notes,
+    };
+
+    shifts[openIdx] = closedShift;
+    this.save(STORAGE_KEYS.SHIFTS, shifts);
+    this.logAction(
+      'SHIFT_CLOSE',
+      `Shift ${closedShift.shiftNumber} closed (Z-Report). Expected: ৳${expectedCash.toFixed(2)}, Counted: ৳${actualCashCounted.toFixed(2)}, Diff: ৳${discrepancy.toFixed(2)}`
+    );
+    return closedShift;
+  }
+
+  // ===================== DAMAGE, WASTE & COMPANY RETURNS (ERP) =====================
+  getDamageWasteRecords(): DamageWasteItem[] {
+    return this.load<DamageWasteItem[]>(STORAGE_KEYS.DAMAGE_WASTE, []);
+  }
+
+  recordDamageWaste(item: Omit<DamageWasteItem, 'id' | 'reportedAt'>): DamageWasteItem {
+    const list = this.getDamageWasteRecords();
+    const batches = this.getBatches();
+    const now = new Date().toISOString();
+
+    const bIdx = batches.findIndex((b) => b.id === item.batchId);
+    if (bIdx !== -1) {
+      batches[bIdx].quantityInStock = Math.max(0, batches[bIdx].quantityInStock - item.quantity);
+      if (batches[bIdx].quantityInStock === 0) {
+        batches[bIdx].status = 'expired';
+      }
+    }
+
+    const record: DamageWasteItem = {
+      ...item,
+      id: `dam-${Date.now()}`,
+      reportedAt: now,
+    };
+
+    list.unshift(record);
+    this.save(STORAGE_KEYS.DAMAGE_WASTE, list);
+    this.save(STORAGE_KEYS.BATCHES, batches);
+
+    this.logAction(
+      'DAMAGE_WRITE_OFF',
+      `Recorded ${item.quantity} units of ${item.medicineName} (${item.reason}). Loss value: ৳${item.totalLoss.toFixed(2)}`
+    );
+    return record;
+  }
+
+  // ===================== CLINICAL PRESCRIPTION REGISTER =====================
+  getPrescriptionRecords(): PrescriptionRecord[] {
+    return this.load<PrescriptionRecord[]>(STORAGE_KEYS.PRESCRIPTIONS, []);
+  }
+
+  addPrescriptionRecord(rx: Omit<PrescriptionRecord, 'id' | 'registeredAt'>): PrescriptionRecord {
+    const list = this.getPrescriptionRecords();
+    const record: PrescriptionRecord = {
+      ...rx,
+      id: `rx-${Date.now()}`,
+      registeredAt: new Date().toISOString(),
+    };
+    list.unshift(record);
+    this.save(STORAGE_KEYS.PRESCRIPTIONS, list);
+    this.logAction('RX_REGISTER', `Registered Prescription ${record.rxNumber} for Patient ${record.patientName} (BMDC: ${record.doctorBmdc})`);
+    return record;
+  }
+
   // ===================== BACKUP & RESTORE =====================
   exportFullBackup(): string {
     const backup = {
@@ -715,6 +956,10 @@ class DatabaseService {
       heldSales: this.getHeldSales(),
       purchases: this.getPurchases(),
       auditLogs: this.getAuditLogs(),
+      returns: this.getSaleReturns(),
+      shifts: this.getCashShifts(),
+      damageWaste: this.getDamageWasteRecords(),
+      prescriptions: this.getPrescriptionRecords(),
     };
     return JSON.stringify(backup, null, 2);
   }
@@ -733,6 +978,10 @@ class DatabaseService {
         if (parsed.heldSales) this.save(STORAGE_KEYS.HELD_SALES, parsed.heldSales);
         if (parsed.purchases) this.save(STORAGE_KEYS.PURCHASES, parsed.purchases);
         if (parsed.auditLogs) this.save(STORAGE_KEYS.AUDIT_LOGS, parsed.auditLogs);
+        if (parsed.returns) this.save(STORAGE_KEYS.RETURNS, parsed.returns);
+        if (parsed.shifts) this.save(STORAGE_KEYS.SHIFTS, parsed.shifts);
+        if (parsed.damageWaste) this.save(STORAGE_KEYS.DAMAGE_WASTE, parsed.damageWaste);
+        if (parsed.prescriptions) this.save(STORAGE_KEYS.PRESCRIPTIONS, parsed.prescriptions);
         this.logAction('BACKUP_RESTORE', 'System restored from JSON backup archive.');
         return true;
       }
@@ -755,6 +1004,10 @@ class DatabaseService {
     this.removeItem(STORAGE_KEYS.PURCHASES);
     this.removeItem(STORAGE_KEYS.SETTINGS);
     this.removeItem(STORAGE_KEYS.AUDIT_LOGS);
+    this.removeItem(STORAGE_KEYS.RETURNS);
+    this.removeItem(STORAGE_KEYS.SHIFTS);
+    this.removeItem(STORAGE_KEYS.DAMAGE_WASTE);
+    this.removeItem(STORAGE_KEYS.PRESCRIPTIONS);
 
     this.save(STORAGE_KEYS.SETTINGS, initialSettings);
     this.save(STORAGE_KEYS.MEDICINES, initialMedicines);
@@ -766,6 +1019,10 @@ class DatabaseService {
     this.save(STORAGE_KEYS.HELD_SALES, []);
     this.save(STORAGE_KEYS.PURCHASES, []);
     this.save(STORAGE_KEYS.AUDIT_LOGS, initialAuditLogs);
+    this.save(STORAGE_KEYS.RETURNS, []);
+    this.save(STORAGE_KEYS.SHIFTS, []);
+    this.save(STORAGE_KEYS.DAMAGE_WASTE, []);
+    this.save(STORAGE_KEYS.PRESCRIPTIONS, []);
 
     this.logAction('FACTORY_RESET', 'Database reset to initial Medex & Arogga pharmaceutical index.');
   }
