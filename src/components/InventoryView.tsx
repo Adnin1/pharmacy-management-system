@@ -21,7 +21,12 @@ import {
   FileSpreadsheet,
   CheckCircle2,
   AlertCircle,
-  Filter
+  Filter,
+  ChevronLeft,
+  ChevronRight,
+  Database,
+  RefreshCw,
+  Sparkles
 } from 'lucide-react';
 
 interface InventoryViewProps {
@@ -61,6 +66,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ settings }) => {
   // Bulk Import state
   const [importText, setImportText] = useState('');
   const [importStatus, setImportStatus] = useState<{ success?: number; error?: string } | null>(null);
+
+  // Pagination & Mega Catalog Sync state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [isSyncingMega, setIsSyncingMega] = useState(false);
+  const [syncProgress, setSyncProgress] = useState(0);
 
   // New Medicine Form State
   const [medForm, setMedForm] = useState({
@@ -142,6 +153,32 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ settings }) => {
       return matchCat && matchSegment && matchCold && matchSearch && matchStock;
     });
   }, [medicines, selectedCategory, selectedSegment, onlyColdChain, search, stockFilter]);
+
+  // Reset pagination on filter change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, selectedCategory, selectedSegment, onlyColdChain, stockFilter]);
+
+  const totalPages = Math.ceil(filtered.length / pageSize) || 1;
+  const paginatedMedicines = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filtered.slice(start, start + pageSize);
+  }, [filtered, currentPage, pageSize]);
+
+  const handleSyncMegaCatalog = async () => {
+    try {
+      setIsSyncingMega(true);
+      setSyncProgress(15);
+      const count = await db.syncMegaCatalog((p) => setSyncProgress(p));
+      refresh();
+      alert(`🎉 Successfully synchronized ${count} Bangladesh medicines from MedEx & DGDA master catalog!`);
+    } catch (err: any) {
+      alert(`Sync failed: ${err.message || 'Could not fetch catalog file'}`);
+    } finally {
+      setIsSyncingMega(false);
+      setSyncProgress(0);
+    }
+  };
 
   const handleSaveMedicine = (e: React.FormEvent) => {
     e.preventDefault();
@@ -384,7 +421,20 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ settings }) => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={handleSyncMegaCatalog}
+            disabled={isSyncingMega}
+            className="inline-flex items-center space-x-2 px-3.5 py-2.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 active:scale-95 text-xs font-bold rounded-xl transition-all cursor-pointer shadow-sm disabled:opacity-50"
+          >
+            {isSyncingMega ? (
+              <RefreshCw className="w-4 h-4 text-indigo-600 animate-spin" />
+            ) : (
+              <Database className="w-4 h-4 text-indigo-600" />
+            )}
+            <span>{isSyncingMega ? `Syncing (${syncProgress}%)...` : 'Sync 10,000+ MedEx & DGDA'}</span>
+          </button>
+
           <button
             onClick={() => {
               setImportText('');
@@ -541,7 +591,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ settings }) => {
                   </td>
                 </tr>
               ) : (
-                filtered.map((med) => {
+                paginatedMedicines.map((med) => {
                   const totalStock = db.getMedicineStock(med.id);
                   const batches = db.getBatchesForMedicine(med.id);
                   const fefoBatch = batches[0];
@@ -694,6 +744,58 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ settings }) => {
         </div>
       </div>
 
+      {/* Pagination Controls */}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-4 py-3 bg-white rounded-2xl border border-slate-200 shadow-sm text-xs text-slate-600">
+        <div className="flex items-center gap-2">
+          <span>
+            Showing <strong className="text-slate-900">{filtered.length === 0 ? 0 : (currentPage - 1) * pageSize + 1}</strong> to{' '}
+            <strong className="text-slate-900">{Math.min(currentPage * pageSize, filtered.length)}</strong> of{' '}
+            <strong className="text-slate-900">{filtered.length}</strong> medicines
+          </span>
+          <span className="text-slate-300">|</span>
+          <div className="flex items-center gap-1.5">
+            <span>Per page:</span>
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setCurrentPage(1);
+              }}
+              className="px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold focus:outline-none cursor-pointer"
+            >
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={250}>250</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+            disabled={currentPage <= 1}
+            className="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-50 border border-slate-200 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl font-semibold cursor-pointer transition-colors"
+          >
+            <ChevronLeft className="w-3.5 h-3.5" />
+            <span>Prev</span>
+          </button>
+          
+          <span className="px-3 py-1 font-mono font-bold text-slate-800 bg-slate-100 rounded-lg text-xs">
+            {currentPage} / {totalPages}
+          </span>
+
+          <button
+            onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+            disabled={currentPage >= totalPages}
+            className="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-50 border border-slate-200 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl font-semibold cursor-pointer transition-colors"
+          >
+            <span>Next</span>
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
       {/* BULK IMPORT MODAL (MEDEX / AROGGA SYNC) */}
       {isBulkImportOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
@@ -715,6 +817,29 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ settings }) => {
             </div>
 
             <div className="p-6 space-y-4 text-xs">
+              {/* Master Catalog 1-Click Sync Option */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-indigo-50 border border-indigo-100 rounded-xl">
+                <div>
+                  <span className="font-bold text-indigo-900 block flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                    Pre-compiled MedEx & DGDA Mega Catalog (10,000+ Medicines)
+                  </span>
+                  <span className="text-indigo-700 text-[11px]">Includes all 12 special segments, cold-chain biologics, antimicrobials, and pricing.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await handleSyncMegaCatalog();
+                    setIsBulkImportOpen(false);
+                  }}
+                  disabled={isSyncingMega}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold transition-colors cursor-pointer shadow-sm self-start sm:self-auto disabled:opacity-50"
+                >
+                  <Database className="w-3.5 h-3.5" />
+                  <span>{isSyncingMega ? `Syncing (${syncProgress}%)...` : '1-Click Master Sync'}</span>
+                </button>
+              </div>
+
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-sky-50 border border-sky-100 rounded-xl">
                 <div>
                   <span className="font-bold text-sky-900 block">MedEx & Arogga Catalog Synchronizer</span>

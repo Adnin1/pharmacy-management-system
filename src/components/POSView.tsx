@@ -114,6 +114,8 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     });
   }, [medicines, selectedSegment, searchQuery]);
 
+  const displayedMedicines = useMemo(() => filteredMedicines.slice(0, 60), [filteredMedicines]);
+
   // Add medicine to cart with FEFO batch selection
   const addToCart = (med: Medicine) => {
     const batches = db.getBatchesForMedicine(med.id);
@@ -392,7 +394,7 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
 
         {/* Medicines Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 overflow-y-auto max-h-[calc(100vh-230px)] pr-1">
-          {filteredMedicines.map((med) => {
+          {displayedMedicines.map((med) => {
             const batches = db.getBatchesForMedicine(med.id);
             const totalStock = batches.reduce((sum, b) => sum + b.quantityInStock, 0);
             const fefoBatch = batches[0];
@@ -472,6 +474,11 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
             );
           })}
         </div>
+        {filteredMedicines.length > displayedMedicines.length && (
+          <div className="mt-2 text-center text-[11px] text-slate-400 bg-slate-50 py-1.5 rounded-xl border border-slate-200">
+            Showing top {displayedMedicines.length} of {filteredMedicines.length} matching items. Type in search bar to filter instantly.
+          </div>
+        )}
       </div>
 
       {/* RIGHT COLUMN: POS Billing Cart & Transaction Manager (5 cols) */}

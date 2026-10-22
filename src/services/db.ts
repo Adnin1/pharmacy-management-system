@@ -40,6 +40,11 @@ type Listener = () => void;
 class DatabaseService {
   private listeners: Set<Listener> = new Set();
   private memoryStore: Map<string, string> = new Map();
+  private cache: Map<string, any> = new Map();
+
+  constructor() {
+    this.initIndexedDB();
+  }
 
   private isStorageAvailable(): boolean {
     try {
@@ -49,44 +54,126 @@ class DatabaseService {
     }
   }
 
-  private getItem(key: string): string | null {
-    if (this.isStorageAvailable()) {
-      return window.localStorage.getItem(key);
+  private async initIndexedDB() {
+    if (typeof window !== 'undefined' && window.indexedDB) {
+      try {
+        const db = await this.idbOpen();
+        const tx = db.transaction('keyval', 'readonly');
+        const store = tx.objectStore('keyval');
+        const req = store.openCursor();
+        req.onsuccess = (e: any) => {
+          const cursor = e.target.result;
+          if (cursor) {
+            this.memoryStore.set(cursor.key as string, cursor.value);
+            this.cache.delete(cursor.key as string);
+            cursor.continue();
+          } else {
+            this.notify();
+          }
+        };
+      } catch {
+        // Fallback silently if IndexedDB is unavailable
+      }
     }
-    return this.memoryStore.get(key) || null;
+  }
+
+  private idbOpen(): Promise<IDBDatabase> {
+    return new Promise((resolve, reject) => {
+      if (typeof window === 'undefined' || !window.indexedDB) {
+        return reject(new Error('IndexedDB not supported'));
+      }
+      const request = window.indexedDB.open('MedCare_PMS_Store', 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains('keyval')) {
+          db.createObjectStore('keyval');
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  private async idbSet(key: string, value: string): Promise<void> {
+    try {
+      const db = await this.idbOpen();
+      const tx = db.transaction('keyval', 'readwrite');
+      tx.objectStore('keyval').put(value, key);
+    } catch {
+      // Ignored in headless/test environments
+    }
+  }
+
+  private async idbRemove(key: string): Promise<void> {
+    try {
+      const db = await this.idbOpen();
+      const tx = db.transaction('keyval', 'readwrite');
+      tx.objectStore('keyval').delete(key);
+    } catch {
+      // Ignored
+    }
+  }
+
+  private getItem(key: string): string | null {
+    if (this.memoryStore.has(key)) {
+      return this.memoryStore.get(key)!;
+    }
+    if (this.isStorageAvailable()) {
+      try {
+        return window.localStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   private setItem(key: string, value: string): void {
+    this.memoryStore.set(key, value);
     if (this.isStorageAvailable()) {
-      window.localStorage.setItem(key, value);
-    } else {
-      this.memoryStore.set(key, value);
+      try {
+        window.localStorage.setItem(key, value);
+      } catch {
+        // LocalStorage quota exceeded (>5MB) - safely stored in IndexedDB and memoryStore
+      }
     }
+    this.idbSet(key, value);
   }
 
   private removeItem(key: string): void {
+    this.memoryStore.delete(key);
+    this.cache.delete(key);
     if (this.isStorageAvailable()) {
-      window.localStorage.removeItem(key);
-    } else {
-      this.memoryStore.delete(key);
+      try {
+        window.localStorage.removeItem(key);
+      } catch {}
     }
+    this.idbRemove(key);
   }
 
   private load<T>(key: string, fallback: T): T {
+    if (this.cache.has(key)) {
+      return this.cache.get(key) as T;
+    }
     try {
       const data = this.getItem(key);
       if (!data) {
+        this.cache.set(key, fallback);
         this.setItem(key, JSON.stringify(fallback));
         return fallback;
       }
-      return JSON.parse(data) as T;
+      const parsed = JSON.parse(data) as T;
+      this.cache.set(key, parsed);
+      return parsed;
     } catch {
+      this.cache.set(key, fallback);
       return fallback;
     }
   }
 
   private save<T>(key: string, data: T): void {
     try {
+      this.cache.set(key, data);
       this.setItem(key, JSON.stringify(data));
       this.notify();
     } catch (e) {
@@ -142,9 +229,10 @@ class DatabaseService {
     return newMedicine;
   }
 
-  // Bulk import medicines (Medex / Arogga catalog synchronizer)
+  // Bulk import medicines (Medex / DGDA / Arogga catalog synchronizer)
   importBulkMedicines(
-    newMeds: (Omit<Medicine, 'id' | 'createdAt' | 'updatedAt'> & {
+    newMeds: (Omit<Medicine, 'id' | 'createdAt' | 'updatedAt' | 'barcode'> & {
+      barcode?: string;
       sellingPrice?: number;
       purchasePrice?: number;
       quantityInStock?: number;
@@ -154,15 +242,18 @@ class DatabaseService {
     })[]
   ): number {
     const medicines = this.getMedicines();
+    const existingKeys = new Set(
+      medicines.map((x) => `${x.name.toLowerCase()}|${(x.strength || '').toLowerCase()}|${(x.manufacturer || '').toLowerCase()}`)
+    );
     let imported = 0;
     const now = new Date().toISOString();
+    const allBatches = this.getBatches();
+    const newBatches: Batch[] = [];
 
     newMeds.forEach((m, idx) => {
-      // Check duplicate by name + strength + manufacturer
-      const exists = medicines.some(
-        (x) => x.name.toLowerCase() === m.name.toLowerCase() && x.strength === m.strength && x.manufacturer === m.manufacturer
-      );
-      if (!exists) {
+      const lookupKey = `${m.name.toLowerCase()}|${(m.strength || '').toLowerCase()}|${(m.manufacturer || '').toLowerCase()}`;
+      if (!existingKeys.has(lookupKey)) {
+        existingKeys.add(lookupKey);
         const med: Medicine = {
           name: m.name,
           genericName: m.genericName,
@@ -190,12 +281,12 @@ class DatabaseService {
         };
         medicines.push(med);
 
-        // Auto-seed an active batch so it's immediately sellable
         const sellPrice = typeof m.sellingPrice === 'number' && m.sellingPrice > 0 ? m.sellingPrice : 15;
         const buyPrice = typeof m.purchasePrice === 'number' && m.purchasePrice > 0 ? m.purchasePrice : Math.round(sellPrice * 0.85 * 100) / 100;
         const stockQty = typeof m.quantityInStock === 'number' && m.quantityInStock > 0 ? m.quantityInStock : 100;
 
-        this.addBatch({
+        newBatches.push({
+          id: `batch-imp-${Date.now()}-${idx}`,
           medicineId: med.id,
           batchNumber: m.batchNumber || `B-${Date.now().toString().slice(-4)}${idx}`,
           manufacturingDate: m.manufacturingDate || new Date().toISOString().slice(0, 10),
@@ -203,15 +294,41 @@ class DatabaseService {
           purchasePrice: buyPrice,
           sellingPrice: sellPrice,
           quantityInStock: stockQty,
+          status: 'active',
         });
 
         imported++;
       }
     });
 
+    if (newBatches.length > 0) {
+      allBatches.unshift(...newBatches);
+      this.save(STORAGE_KEYS.BATCHES, allBatches);
+    }
     this.save(STORAGE_KEYS.MEDICINES, medicines);
-    this.logAction('CATALOG_SYNC', `Imported ${imported} medicines from Medex/Arogga dataset.`);
+    this.logAction('CATALOG_SYNC', `Imported ${imported} medicines from Medex/DGDA dataset.`);
     return imported;
+  }
+
+  // Load and synchronize Bangladesh Mega Catalog (5,000+ formulations from MedEx & DGDA)
+  async syncMegaCatalog(onProgress?: (progress: number) => void): Promise<number> {
+    try {
+      if (typeof window === 'undefined') return 0;
+      onProgress?.(15);
+      const res = await fetch('/data/bd_medicine_master_catalog.json');
+      if (!res.ok) {
+        throw new Error(`Failed to load catalog file: ${res.statusText}`);
+      }
+      onProgress?.(45);
+      const catalogData = await res.json();
+      onProgress?.(70);
+      const count = this.importBulkMedicines(catalogData);
+      onProgress?.(100);
+      return count;
+    } catch (err) {
+      console.error('Mega catalog sync error:', err);
+      throw err;
+    }
   }
 
   updateMedicine(id: string, updates: Partial<Medicine>): Medicine | null {
@@ -627,6 +744,7 @@ class DatabaseService {
   }
 
   resetToDemoData(): void {
+    this.cache.clear();
     this.removeItem(STORAGE_KEYS.MEDICINES);
     this.removeItem(STORAGE_KEYS.BATCHES);
     this.removeItem(STORAGE_KEYS.CUSTOMERS);

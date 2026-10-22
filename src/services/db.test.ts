@@ -219,4 +219,35 @@ describe('Pharmacy Management System - Core Database Engine & FEFO Invariants', 
     expect(coldBatches[0].sellingPrice).toBe(45000);
     expect(coldBatches[0].quantityInStock).toBe(5);
   });
+
+  it('efficiently handles large-scale pharmaceutical imports with O(1) deduplication', () => {
+    const bulkPayload = Array.from({ length: 250 }, (_, i) => ({
+      name: `Test Pharma Generic Formulation #${i}`,
+      genericName: `Active Chemical Component #${i % 25}`,
+      category: 'Antibiotic & Antimicrobial' as const,
+      specialSegment: 'Antimicrobial' as const,
+      medicineType: 'Allopathic' as const,
+      dosageForm: 'Tablet' as const,
+      strength: `${(i % 10 + 1) * 100} mg`,
+      manufacturer: `Bangladesh Pharma Ltd #${i % 10}`,
+      unit: 'Pcs',
+      unitsPerBox: 100,
+      reorderLevel: 20,
+      rackLocation: `Rack ${String.fromCharCode(65 + (i % 6))}-${i % 10}`,
+      isColdChain: i % 10 === 0,
+      requiresPrescription: true,
+      isAntibiotic: true,
+      isNarcotic: false,
+      sellingPrice: 25.5,
+      purchasePrice: 20.0,
+      quantityInStock: 200,
+    }));
+
+    const imported = db.importBulkMedicines(bulkPayload);
+    expect(imported).toBe(250);
+
+    // Re-importing the same payload should result in 0 new imports (strict deduplication)
+    const duplicateImport = db.importBulkMedicines(bulkPayload);
+    expect(duplicateImport).toBe(0);
+  });
 });
