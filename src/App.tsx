@@ -23,6 +23,8 @@ export function App() {
   const [totalMedicinesCount, setTotalMedicinesCount] = useState<number>(0);
   const [openShift, setOpenShift] = useState<CashShift | null>(null);
   const [isShiftModalOpen, setIsShiftModalOpen] = useState<boolean>(false);
+  const [isAutoSeeding, setIsAutoSeeding] = useState<boolean>(false);
+  const [seedProgress, setSeedProgress] = useState<number>(0);
 
   // Compute live badges
   const computeAlerts = () => {
@@ -54,6 +56,25 @@ export function App() {
       setSettings(db.getSettings());
       computeAlerts();
     });
+
+    // Auto-seed the full 35,000+ MedEx & DGDA national catalog on fresh launch
+    const autoSeedCatalog = async () => {
+      try {
+        await db.whenReady();
+        const currentCount = db.getMedicines().length;
+        if (currentCount < 1000) {
+          setIsAutoSeeding(true);
+          await db.autoSeedIfEmpty((p) => setSeedProgress(p));
+          computeAlerts();
+        }
+      } catch (err) {
+        console.warn('Auto-seed notice:', err);
+      } finally {
+        setIsAutoSeeding(false);
+      }
+    };
+
+    autoSeedCatalog();
     return () => unsub();
   }, []);
 
@@ -95,6 +116,27 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col font-sans">
+      {/* Auto-seeding top notification banner */}
+      {isAutoSeeding && (
+        <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white px-4 py-2 border-b border-indigo-500/30 shadow-lg flex items-center justify-between text-xs z-50">
+          <div className="flex items-center space-x-2.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
+            <span className="font-bold text-emerald-300">
+              Auto-Seeding 35,000+ Bangladesh National Medicines (MedEx & DGDA)...
+            </span>
+            <span className="text-slate-400 font-mono text-[11px] hidden sm:inline">
+              Loading active batches, cold chain flags, and unit retail prices ({seedProgress}%)
+            </span>
+          </div>
+          <div className="w-28 bg-slate-800 rounded-full h-1.5 overflow-hidden border border-slate-700">
+            <div
+              className="bg-emerald-400 h-1.5 transition-all duration-300 rounded-full"
+              style={{ width: `${Math.max(5, seedProgress)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Top Navbar */}
       <Navbar
         currentTab={currentTab}

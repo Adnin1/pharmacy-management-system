@@ -50,9 +50,18 @@ class DatabaseService {
   private listeners: Set<Listener> = new Set();
   private memoryStore: Map<string, string> = new Map();
   private cache: Map<string, any> = new Map();
+  private readyPromise: Promise<void>;
+  private resolveReady!: () => void;
 
   constructor() {
+    this.readyPromise = new Promise((resolve) => {
+      this.resolveReady = resolve;
+    });
     this.initIndexedDB();
+  }
+
+  public whenReady(): Promise<void> {
+    return this.readyPromise;
   }
 
   private isStorageAvailable(): boolean {
@@ -77,12 +86,18 @@ class DatabaseService {
             this.cache.delete(cursor.key as string);
             cursor.continue();
           } else {
+            this.resolveReady();
             this.notify();
           }
         };
+        req.onerror = () => {
+          this.resolveReady();
+        };
       } catch {
-        // Fallback silently if IndexedDB is unavailable
+        this.resolveReady();
       }
+    } else {
+      this.resolveReady();
     }
   }
 
@@ -338,6 +353,16 @@ class DatabaseService {
       console.error('Mega catalog sync error:', err);
       throw err;
     }
+  }
+
+  // Automatically seed the 35,000+ national catalog if database is in initial state
+  async autoSeedIfEmpty(onProgress?: (progress: number) => void): Promise<number> {
+    await this.whenReady();
+    const current = this.getMedicines();
+    if (current.length < 1000) {
+      return await this.syncMegaCatalog(onProgress);
+    }
+    return 0;
   }
 
   updateMedicine(id: string, updates: Partial<Medicine>): Medicine | null {

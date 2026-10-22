@@ -446,4 +446,11 @@ describe('Pharmacy Management System - Core Database Engine & FEFO Invariants', 
     const list = db.getDamageWasteRecords();
     expect(list.some((r) => r.id === record.id)).toBe(true);
   });
+
+  it('provides whenReady promise and auto-seed capability for 35,000+ master catalog', async () => {
+    await expect(db.whenReady()).resolves.toBeUndefined();
+    // In node/test environment without window.fetch, autoSeedIfEmpty safely handles environment
+    const count = await db.autoSeedIfEmpty();
+    expect(typeof count).toBe('number');
+  });
 });
