@@ -432,7 +432,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ settings }) => {
             ) : (
               <Database className="w-4 h-4 text-indigo-600" />
             )}
-            <span>{isSyncingMega ? `Syncing (${syncProgress}%)...` : 'Sync 10,000+ MedEx & DGDA'}</span>
+            <span>{isSyncingMega ? `Syncing (${syncProgress}%)...` : 'Sync 35,000+ MedEx & DGDA'}</span>
           </button>
 
           <button
@@ -822,7 +822,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ settings }) => {
                 <div>
                   <span className="font-bold text-indigo-900 block flex items-center gap-1.5">
                     <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-                    Pre-compiled MedEx & DGDA Mega Catalog (10,000+ Medicines)
+                    Pre-compiled MedEx & DGDA Mega Catalog (35,000+ Medicines)
                   </span>
                   <span className="text-indigo-700 text-[11px]">Includes all 12 special segments, cold-chain biologics, antimicrobials, and pricing.</span>
                 </div>

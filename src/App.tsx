@@ -18,11 +18,13 @@ export function App() {
   const [settings, setSettings] = useState<PharmacySettings>(db.getSettings());
   const [lowStockCount, setLowStockCount] = useState<number>(0);
   const [expiringCount, setExpiringCount] = useState<number>(0);
+  const [totalMedicinesCount, setTotalMedicinesCount] = useState<number>(0);
 
   // Compute live badges
   const computeAlerts = () => {
     const meds = db.getMedicines();
     const batches = db.getBatches();
+    setTotalMedicinesCount(meds.length);
 
     // Low stock
     const low = meds.filter((m) => {
@@ -94,6 +96,7 @@ export function App() {
         settings={settings}
         lowStockCount={lowStockCount}
         expiringCount={expiringCount}
+        totalMedicinesCount={totalMedicinesCount}
       />
 
       {/* Main Workspace Body */}

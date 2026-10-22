@@ -14,7 +14,8 @@ import {
   Clock,
   Maximize2,
   Minimize2,
-  UserCheck
+  UserCheck,
+  Database
 } from 'lucide-react';
 import type { UserRole, PharmacySettings } from '../types/pharmacy';
 
@@ -37,6 +38,7 @@ interface NavbarProps {
   settings: PharmacySettings;
   lowStockCount: number;
   expiringCount: number;
+  totalMedicinesCount: number;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -47,6 +49,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   settings,
   lowStockCount,
   expiringCount,
+  totalMedicinesCount,
 }) => {
   const [time, setTime] = useState<string>('');
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -108,7 +111,24 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
 
         {/* Status indicators & Utilities */}
-        <div className="flex items-center space-x-4">
+        <div className="flex items-center space-x-3">
+          {/* MedEx Master Catalog Indicator */}
+          {totalMedicinesCount >= 1000 ? (
+            <div className="hidden lg:inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-xs font-semibold">
+              <Database className="w-3.5 h-3.5 text-emerald-400" />
+              <span>{totalMedicinesCount.toLocaleString()} MedEx/DGDA Active</span>
+            </div>
+          ) : (
+            <button
+              onClick={() => onSelectTab('inventory')}
+              title="Click to sync 35,000+ MedEx & DGDA catalog"
+              className="hidden lg:inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 hover:bg-indigo-500/30 transition-all cursor-pointer animate-pulse text-xs font-semibold"
+            >
+              <Database className="w-3.5 h-3.5 text-indigo-400" />
+              <span>{totalMedicinesCount} Meds (35,000+ Ready)</span>
+            </button>
+          )}
+
           {/* Alerts ticker */}
           {expiringCount > 0 && (
             <button

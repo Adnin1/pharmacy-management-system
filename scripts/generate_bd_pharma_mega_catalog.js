@@ -903,7 +903,7 @@ function generateMegaCatalog(targetCount = 5000) {
 }
 
 function run() {
-  const targetCount = 10000;
+  const targetCount = 35000;
   const catalog = generateMegaCatalog(targetCount);
 
   // Write to public/data for web app lazy fetch
