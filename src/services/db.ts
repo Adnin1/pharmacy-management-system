@@ -8,7 +8,8 @@ import type {
   Purchase, 
   PharmacySettings, 
   AuditLog,
-  CartItem
+  CartItem,
+  HeldSale
 } from '../types/pharmacy';
 import { 
   initialMedicines, 
@@ -22,15 +23,16 @@ import {
 } from './seedData';
 
 const STORAGE_KEYS = {
-  MEDICINES: 'pms_medicines_v1',
-  BATCHES: 'pms_batches_v1',
-  CUSTOMERS: 'pms_customers_v1',
-  DOCTORS: 'pms_doctors_v1',
-  SUPPLIERS: 'pms_suppliers_v1',
-  SALES: 'pms_sales_v1',
-  PURCHASES: 'pms_purchases_v1',
-  SETTINGS: 'pms_settings_v1',
-  AUDIT_LOGS: 'pms_audit_logs_v1',
+  MEDICINES: 'pms_medicines_v2',
+  BATCHES: 'pms_batches_v2',
+  CUSTOMERS: 'pms_customers_v2',
+  DOCTORS: 'pms_doctors_v2',
+  SUPPLIERS: 'pms_suppliers_v2',
+  SALES: 'pms_sales_v2',
+  HELD_SALES: 'pms_held_sales_v2',
+  PURCHASES: 'pms_purchases_v2',
+  SETTINGS: 'pms_settings_v2',
+  AUDIT_LOGS: 'pms_audit_logs_v2',
 };
 
 type Listener = () => void;
@@ -140,6 +142,78 @@ class DatabaseService {
     return newMedicine;
   }
 
+  // Bulk import medicines (Medex / Arogga catalog synchronizer)
+  importBulkMedicines(
+    newMeds: (Omit<Medicine, 'id' | 'createdAt' | 'updatedAt'> & {
+      sellingPrice?: number;
+      purchasePrice?: number;
+      quantityInStock?: number;
+      batchNumber?: string;
+      expiryDate?: string;
+      manufacturingDate?: string;
+    })[]
+  ): number {
+    const medicines = this.getMedicines();
+    let imported = 0;
+    const now = new Date().toISOString();
+
+    newMeds.forEach((m, idx) => {
+      // Check duplicate by name + strength + manufacturer
+      const exists = medicines.some(
+        (x) => x.name.toLowerCase() === m.name.toLowerCase() && x.strength === m.strength && x.manufacturer === m.manufacturer
+      );
+      if (!exists) {
+        const med: Medicine = {
+          name: m.name,
+          genericName: m.genericName,
+          category: m.category,
+          specialSegment: m.specialSegment,
+          medicineType: m.medicineType || 'Allopathic',
+          drugClass: m.drugClass,
+          dosageForm: m.dosageForm,
+          strength: m.strength,
+          manufacturer: m.manufacturer,
+          unit: m.unit || 'Pcs',
+          unitsPerBox: m.unitsPerBox || 100,
+          reorderLevel: m.reorderLevel || 50,
+          rackLocation: m.rackLocation || (m.isColdChain ? 'Cold Storage (2°C - 8°C)' : 'Rack General'),
+          isColdChain: m.isColdChain || false,
+          packSize: m.packSize,
+          description: m.description,
+          requiresPrescription: m.requiresPrescription || false,
+          isAntibiotic: m.isAntibiotic || false,
+          isNarcotic: m.isNarcotic || false,
+          barcode: m.barcode || `890${Date.now().toString().slice(-7)}${idx}`,
+          id: `med-imp-${Date.now()}-${idx}`,
+          createdAt: now,
+          updatedAt: now,
+        };
+        medicines.push(med);
+
+        // Auto-seed an active batch so it's immediately sellable
+        const sellPrice = typeof m.sellingPrice === 'number' && m.sellingPrice > 0 ? m.sellingPrice : 15;
+        const buyPrice = typeof m.purchasePrice === 'number' && m.purchasePrice > 0 ? m.purchasePrice : Math.round(sellPrice * 0.85 * 100) / 100;
+        const stockQty = typeof m.quantityInStock === 'number' && m.quantityInStock > 0 ? m.quantityInStock : 100;
+
+        this.addBatch({
+          medicineId: med.id,
+          batchNumber: m.batchNumber || `B-${Date.now().toString().slice(-4)}${idx}`,
+          manufacturingDate: m.manufacturingDate || new Date().toISOString().slice(0, 10),
+          expiryDate: m.expiryDate || new Date(Date.now() + 730 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+          purchasePrice: buyPrice,
+          sellingPrice: sellPrice,
+          quantityInStock: stockQty,
+        });
+
+        imported++;
+      }
+    });
+
+    this.save(STORAGE_KEYS.MEDICINES, medicines);
+    this.logAction('CATALOG_SYNC', `Imported ${imported} medicines from Medex/Arogga dataset.`);
+    return imported;
+  }
+
   updateMedicine(id: string, updates: Partial<Medicine>): Medicine | null {
     const medicines = this.getMedicines();
     const idx = medicines.findIndex((m) => m.id === id);
@@ -209,6 +283,37 @@ class DatabaseService {
   // ===================== POS & SALES TRANSACTIONS =====================
   getSales(): Sale[] {
     return this.load<Sale[]>(STORAGE_KEYS.SALES, initialSales);
+  }
+
+  // Hold / Recall Sale Orders
+  getHeldSales(): HeldSale[] {
+    return this.load<HeldSale[]>(STORAGE_KEYS.HELD_SALES, []);
+  }
+
+  holdCurrentSale(held: Omit<HeldSale, 'id' | 'heldAt'> | (any & { cartItems?: CartItem[] })): HeldSale {
+    const list = this.getHeldSales();
+    const items = held.items || (held as any).cartItems || [];
+    const subtotal = typeof held.subtotal === 'number' 
+      ? held.subtotal 
+      : items.reduce((acc: number, it: any) => acc + (it.total || 0), 0);
+    const newHeld: HeldSale = {
+      customer: held.customer || null,
+      doctor: held.doctor || null,
+      items,
+      subtotal,
+      notes: held.notes || (held as any).note || '',
+      id: `held-${Date.now()}`,
+      heldAt: new Date().toISOString(),
+    };
+    list.unshift(newHeld);
+    this.save(STORAGE_KEYS.HELD_SALES, list);
+    this.logAction('POS_HOLD', `Sale held with ${newHeld.items.length} items (Total: ৳${newHeld.subtotal.toFixed(2)})`);
+    return newHeld;
+  }
+
+  removeHeldSale(id: string): void {
+    const list = this.getHeldSales().filter((h) => h.id !== id);
+    this.save(STORAGE_KEYS.HELD_SALES, list);
   }
 
   // Atomic POS Sale Execution
@@ -474,7 +579,6 @@ class DatabaseService {
       details,
     };
     logs.unshift(newLog);
-    // Keep last 500 audit events
     if (logs.length > 500) logs.pop();
     this.save(STORAGE_KEYS.AUDIT_LOGS, logs);
   }
@@ -482,7 +586,7 @@ class DatabaseService {
   // ===================== BACKUP & RESTORE =====================
   exportFullBackup(): string {
     const backup = {
-      version: '1.0',
+      version: '2.0',
       exportedAt: new Date().toISOString(),
       settings: this.getSettings(),
       medicines: this.getMedicines(),
@@ -491,6 +595,7 @@ class DatabaseService {
       doctors: this.getDoctors(),
       suppliers: this.getSuppliers(),
       sales: this.getSales(),
+      heldSales: this.getHeldSales(),
       purchases: this.getPurchases(),
       auditLogs: this.getAuditLogs(),
     };
@@ -508,6 +613,7 @@ class DatabaseService {
         if (parsed.doctors) this.save(STORAGE_KEYS.DOCTORS, parsed.doctors);
         if (parsed.suppliers) this.save(STORAGE_KEYS.SUPPLIERS, parsed.suppliers);
         if (parsed.sales) this.save(STORAGE_KEYS.SALES, parsed.sales);
+        if (parsed.heldSales) this.save(STORAGE_KEYS.HELD_SALES, parsed.heldSales);
         if (parsed.purchases) this.save(STORAGE_KEYS.PURCHASES, parsed.purchases);
         if (parsed.auditLogs) this.save(STORAGE_KEYS.AUDIT_LOGS, parsed.auditLogs);
         this.logAction('BACKUP_RESTORE', 'System restored from JSON backup archive.');
@@ -527,6 +633,7 @@ class DatabaseService {
     this.removeItem(STORAGE_KEYS.DOCTORS);
     this.removeItem(STORAGE_KEYS.SUPPLIERS);
     this.removeItem(STORAGE_KEYS.SALES);
+    this.removeItem(STORAGE_KEYS.HELD_SALES);
     this.removeItem(STORAGE_KEYS.PURCHASES);
     this.removeItem(STORAGE_KEYS.SETTINGS);
     this.removeItem(STORAGE_KEYS.AUDIT_LOGS);
@@ -538,10 +645,11 @@ class DatabaseService {
     this.save(STORAGE_KEYS.DOCTORS, initialDoctors);
     this.save(STORAGE_KEYS.SUPPLIERS, initialSuppliers);
     this.save(STORAGE_KEYS.SALES, initialSales);
+    this.save(STORAGE_KEYS.HELD_SALES, []);
     this.save(STORAGE_KEYS.PURCHASES, []);
     this.save(STORAGE_KEYS.AUDIT_LOGS, initialAuditLogs);
 
-    this.logAction('FACTORY_RESET', 'Database reset to initial factory demo dataset.');
+    this.logAction('FACTORY_RESET', 'Database reset to initial Medex & Arogga pharmaceutical index.');
   }
 }
 

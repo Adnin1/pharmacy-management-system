@@ -7,7 +7,10 @@ export type DosageForm =
   | 'Ointment' 
   | 'Eye Drops' 
   | 'Inhaler' 
-  | 'IV Fluid';
+  | 'IV Fluid'
+  | 'Suppository'
+  | 'Pre-filled Syringe'
+  | 'Powder for Suspension';
 
 export type TherapeuticCategory = 
   | 'Analgesic & Antipyretic'
@@ -20,20 +23,45 @@ export type TherapeuticCategory =
   | 'Multivitamin & Supplement'
   | 'Gastrointestinal & Antispasmodic'
   | 'Dermatological & Topical'
-  | 'Ophthalmic';
+  | 'Ophthalmic'
+  | 'Oncology & Chemotherapy'
+  | 'Biotech & Hormones'
+  | 'Vaccine & Immunological'
+  | 'Herbal & Nutraceutical';
+
+export type SpecialSegment = 
+  | 'All'
+  | 'Antimicrobial'
+  | 'Biotech'
+  | 'Hematology'
+  | 'Hormone'
+  | 'Imported'
+  | 'mAb'
+  | 'Oncology'
+  | 'OTC'
+  | 'Probiotics'
+  | 'Vaccine'
+  | 'Herbal';
+
+export type MedicineType = 'Allopathic' | 'Herbal' | 'Nutraceutical' | 'Biochemical';
 
 export interface Medicine {
   id: string;
   name: string;
   genericName: string;
   category: TherapeuticCategory;
+  specialSegment?: SpecialSegment;
+  medicineType?: MedicineType;
+  drugClass?: string;
   dosageForm: DosageForm;
   strength: string;
   manufacturer: string;
-  unit: string; // e.g. 'Pcs', 'Strip', 'Bottle'
+  unit: string; // e.g. 'Pcs', 'Strip', 'Bottle', 'Vial', 'Canister'
   unitsPerBox: number;
   reorderLevel: number;
-  rackLocation: string; // e.g. 'Rack A-2', 'Drawer C-1'
+  rackLocation: string; // e.g. 'Rack A-1', 'Cold Storage (2°C - 8°C)', 'Locked Narcotic Shelf'
+  isColdChain?: boolean; // Requires 2°C - 8°C refrigeration
+  packSize?: string;
   description?: string;
   requiresPrescription: boolean;
   isAntibiotic: boolean;
@@ -108,6 +136,16 @@ export interface Sale {
   cashierName: string;
   notes?: string;
   status: 'completed' | 'returned' | 'partial_return';
+}
+
+export interface HeldSale {
+  id: string;
+  heldAt: string;
+  customer: Customer | null;
+  doctor: Doctor | null;
+  items: CartItem[];
+  subtotal: number;
+  notes?: string;
 }
 
 export interface Customer {

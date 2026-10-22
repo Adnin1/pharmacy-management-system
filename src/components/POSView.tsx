@@ -6,7 +6,9 @@ import type {
   CartItem, 
   PaymentMethod, 
   PharmacySettings,
-  Sale
+  Sale,
+  SpecialSegment,
+  HeldSale
 } from '../types/pharmacy';
 import { db } from '../services/db';
 import { sound } from '../utils/audio';
@@ -23,9 +25,12 @@ import {
   Banknote, 
   Smartphone, 
   AlertCircle, 
-  Receipt,
-  FileCheck,
-  Tag
+  Receipt, 
+  FileCheck, 
+  Tag, 
+  PauseCircle, 
+  PlayCircle, 
+  ThermometerSnowflake
 } from 'lucide-react';
 
 interface POSViewProps {
@@ -37,10 +42,11 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
   const [medicines, setMedicines] = useState<Medicine[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [doctors, setDoctors] = useState<Doctor[]>([]);
+  const [heldSales, setHeldSales] = useState<HeldSale[]>([]);
   
   // Filtering & Search
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<string>('All');
+  const [selectedSegment, setSelectedSegment] = useState<SpecialSegment>('All');
   
   // Cart state
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -51,6 +57,7 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
   
   // Checkout modal
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
+  const [isHeldModalOpen, setIsHeldModalOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [amountPaidInput, setAmountPaidInput] = useState<string>('');
   const [saleNotes, setSaleNotes] = useState('');
@@ -65,6 +72,7 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     setMedicines(db.getMedicines());
     setCustomers(db.getCustomers());
     setDoctors(db.getDoctors());
+    setHeldSales(db.getHeldSales());
   };
 
   useEffect(() => {
@@ -73,42 +81,50 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     return () => unsubscribe();
   }, []);
 
-  // Quick categories
-  const categories = useMemo(() => {
-    const list: string[] = ['All'];
-    const unique = Array.from(new Set(medicines.map((m) => m.category)));
-    return list.concat(unique);
-  }, [medicines]);
+  // Medex Special Segments
+  const specialSegments: { id: SpecialSegment; label: string; color: string }[] = [
+    { id: 'All', label: 'All Segments', color: 'bg-slate-900 text-white' },
+    { id: 'Antimicrobial', label: 'Antimicrobial', color: 'bg-purple-600 text-white' },
+    { id: 'Biotech', label: 'Biotech & Insulin', color: 'bg-cyan-600 text-white' },
+    { id: 'Hematology', label: 'Hematology', color: 'bg-red-600 text-white' },
+    { id: 'Hormone', label: 'Hormones', color: 'bg-amber-600 text-white' },
+    { id: 'Imported', label: 'Imported (Foreign)', color: 'bg-blue-600 text-white' },
+    { id: 'mAb', label: 'mAb (Biologics)', color: 'bg-indigo-600 text-white' },
+    { id: 'Oncology', label: 'Oncology (Cancer)', color: 'bg-rose-600 text-white' },
+    { id: 'OTC', label: 'OTC / Non-Rx', color: 'bg-emerald-600 text-white' },
+    { id: 'Probiotics', label: 'Probiotics', color: 'bg-teal-600 text-white' },
+    { id: 'Vaccine', label: 'Vaccines', color: 'bg-sky-600 text-white' },
+    { id: 'Herbal', label: 'Herbal & Natural', color: 'bg-green-700 text-white' },
+  ];
 
-  // Filtered medicines
+  // Filtered medicines by Special Segment & Query
   const filteredMedicines = useMemo(() => {
     return medicines.filter((m) => {
-      const matchCat = selectedCategory === 'All' || m.category === selectedCategory;
+      const matchSegment = selectedSegment === 'All' || m.specialSegment === selectedSegment;
       const q = searchQuery.toLowerCase().trim();
-      if (!q) return matchCat;
+      if (!q) return matchSegment;
       const matchSearch =
         m.name.toLowerCase().includes(q) ||
         m.genericName.toLowerCase().includes(q) ||
         m.barcode.includes(q) ||
         m.rackLocation.toLowerCase().includes(q) ||
-        m.manufacturer.toLowerCase().includes(q);
-      return matchCat && matchSearch;
+        m.manufacturer.toLowerCase().includes(q) ||
+        (m.drugClass && m.drugClass.toLowerCase().includes(q));
+      return matchSegment && matchSearch;
     });
-  }, [medicines, selectedCategory, searchQuery]);
+  }, [medicines, selectedSegment, searchQuery]);
 
   // Add medicine to cart with FEFO batch selection
   const addToCart = (med: Medicine) => {
-    // FEFO: Get earliest expiring active batch with stock
     const batches = db.getBatchesForMedicine(med.id);
     if (!batches || batches.length === 0) {
       sound.playWarning();
-      alert(`No stock available for ${med.name}. Please check batch inventory.`);
+      alert(`No stock available for ${med.name}. Please inward stock via Procurement.`);
       return;
     }
 
     const fefoBatch = batches[0]; // Earliest expiry batch
 
-    // Check if item already exists in cart with this batch
     setCart((prevCart) => {
       const existingIdx = prevCart.findIndex(
         (item) => item.medicine.id === med.id && item.batch.id === fefoBatch.id
@@ -130,7 +146,6 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
         return updated;
       }
 
-      // New item
       sound.playScanBeep();
       const newItem: CartItem = {
         medicine: med,
@@ -146,7 +161,6 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     });
   };
 
-  // Change batch for cart item
   const updateCartItemBatch = (index: number, newBatchId: string) => {
     setCart((prevCart) => {
       const updated = [...prevCart];
@@ -170,7 +184,6 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     });
   };
 
-  // Update item quantity
   const updateCartQuantity = (index: number, delta: number) => {
     setCart((prevCart) => {
       const updated = [...prevCart];
@@ -193,7 +206,6 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     });
   };
 
-  // Update item unit (Piece or Box)
   const toggleUnitType = (index: number) => {
     setCart((prevCart) => {
       const updated = [...prevCart];
@@ -216,7 +228,6 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     });
   };
 
-  // Remove item
   const removeFromCart = (index: number) => {
     setCart((prev) => prev.filter((_, i) => i !== index));
   };
@@ -240,7 +251,31 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     return Number((taxableAmount + vatAmount).toFixed(2));
   }, [taxableAmount, vatAmount]);
 
-  // Handle Barcode Scan / Enter key in search
+  // Hold current order
+  const handleHoldSale = () => {
+    if (cart.length === 0) return;
+    db.holdCurrentSale({
+      customer: selectedCustomer,
+      doctor: selectedDoctor,
+      items: cart,
+      subtotal,
+    });
+    sound.playCheckoutSuccess();
+    setCart([]);
+    setSelectedCustomer(null);
+    setSelectedDoctor(null);
+  };
+
+  // Recall held order
+  const handleRecallSale = (held: HeldSale) => {
+    setCart(held.items);
+    setSelectedCustomer(held.customer);
+    setSelectedDoctor(held.doctor);
+    db.removeHeldSale(held.id);
+    setIsHeldModalOpen(false);
+    sound.playScanBeep();
+  };
+
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       if (filteredMedicines.length > 0) {
@@ -250,7 +285,6 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     }
   };
 
-  // Open checkout modal
   const handleOpenCheckout = () => {
     if (cart.length === 0) {
       sound.playWarning();
@@ -261,7 +295,6 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
     setIsCheckoutOpen(true);
   };
 
-  // Process and finalize the sale
   const handleFinalizeSale = () => {
     const paid = parseFloat(amountPaidInput) || 0;
 
@@ -290,11 +323,10 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
         cashierName,
       });
 
-      // Success effects
       sound.playCheckoutSuccess();
       try {
         confetti({
-          particleCount: 70,
+          particleCount: 75,
           spread: 60,
           origin: { y: 0.6 },
         });
@@ -302,7 +334,6 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
         // ignore
       }
 
-      // Reset cart
       setCart([]);
       setSelectedCustomer(null);
       setSelectedDoctor(null);
@@ -310,7 +341,6 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
       setSaleNotes('');
       setIsCheckoutOpen(false);
 
-      // Open receipt
       setCompletedSale(sale);
     } catch (err) {
       sound.playWarning();
@@ -321,8 +351,8 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-4 grid grid-cols-1 lg:grid-cols-12 gap-5 select-none">
-      {/* LEFT COLUMN: Product Catalog & Fast Search (7 cols) */}
-      <div className="lg:col-span-7 flex flex-col space-y-4">
+      {/* LEFT COLUMN: Medex Special Segments & Product Catalog (7 cols) */}
+      <div className="lg:col-span-7 flex flex-col space-y-3.5">
         {/* Search & Barcode input bar */}
         <div className="bg-white p-3 rounded-2xl shadow-sm border border-slate-200/80 flex items-center space-x-3">
           <div className="relative flex-1">
@@ -333,7 +363,7 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={handleSearchKeyDown}
-              placeholder="Search by Medicine, Generic name, Barcode or Rack... (Press Enter to add)"
+              placeholder="Search by Medicine, Generic, Drug Class, Barcode or Rack... (Press Enter to add)"
               className="w-full pl-11 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 font-medium transition-all"
             />
           </div>
@@ -343,25 +373,25 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
           </div>
         </div>
 
-        {/* Category Pills Slider */}
+        {/* Medex Special Segments Bar */}
         <div className="flex items-center space-x-2 overflow-x-auto pb-1 scrollbar-none">
-          {categories.map((cat) => (
+          {specialSegments.map((seg) => (
             <button
-              key={cat}
-              onClick={() => setSelectedCategory(cat)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
-                selectedCategory === cat
-                  ? 'bg-emerald-600 text-white shadow-sm shadow-emerald-500/20'
+              key={seg.id}
+              onClick={() => setSelectedSegment(seg.id)}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
+                selectedSegment === seg.id
+                  ? 'bg-emerald-600 text-white shadow-sm shadow-emerald-500/30 ring-2 ring-emerald-500/20'
                   : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
               }`}
             >
-              {cat}
+              {seg.label}
             </button>
           ))}
         </div>
 
         {/* Medicines Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 overflow-y-auto max-h-[calc(100vh-220px)] pr-1">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 overflow-y-auto max-h-[calc(100vh-230px)] pr-1">
           {filteredMedicines.map((med) => {
             const batches = db.getBatchesForMedicine(med.id);
             const totalStock = batches.reduce((sum, b) => sum + b.quantityInStock, 0);
@@ -381,18 +411,18 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
               >
                 <div>
                   {/* Top tags */}
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 bg-slate-100 text-slate-600 rounded-md">
+                  <div className="flex items-center justify-between gap-1 mb-1.5 flex-wrap">
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 bg-slate-100 text-slate-700 rounded-md">
                       {med.dosageForm} • {med.strength}
                     </span>
-                    {med.isAntibiotic && (
-                      <span className="text-[10px] font-bold px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded-md">
-                        Antibiotic
+                    {med.isColdChain && (
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 bg-cyan-100 text-cyan-800 rounded-md flex items-center gap-1">
+                        <ThermometerSnowflake className="w-3 h-3" /> 2°C–8°C
                       </span>
                     )}
-                    {med.requiresPrescription && !med.isAntibiotic && (
-                      <span className="text-[10px] font-bold px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded-md">
-                        Rx Only
+                    {med.specialSegment && med.specialSegment !== 'All' && (
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded-md">
+                        {med.specialSegment}
                       </span>
                     )}
                   </div>
@@ -403,6 +433,9 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
                   </h3>
                   <p className="text-xs text-slate-500 italic mt-0.5 line-clamp-1">{med.genericName}</p>
                   <p className="text-[10px] text-slate-400 mt-0.5">{med.manufacturer}</p>
+                  {med.packSize && (
+                    <p className="text-[9px] text-slate-400 font-mono mt-0.5">Pack: {med.packSize}</p>
+                  )}
                 </div>
 
                 {/* Stock & FEFO Expiry Info */}
@@ -444,9 +477,9 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
       {/* RIGHT COLUMN: POS Billing Cart & Transaction Manager (5 cols) */}
       <div className="lg:col-span-5 flex flex-col space-y-3">
         <div className="bg-white rounded-2xl shadow-sm border border-slate-200/90 overflow-hidden flex flex-col h-[calc(100vh-120px)]">
-          {/* Header Customer & Doctor Selector */}
+          {/* Header Customer, Doctor & Held Orders Selector */}
           <div className="p-3.5 bg-slate-50 border-b border-slate-200 space-y-2.5">
-            {/* Customer Picker */}
+            {/* Customer Picker & Recall Button */}
             <div className="flex items-center space-x-2">
               <div className="flex-1">
                 <select
@@ -466,10 +499,15 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
                 </select>
               </div>
 
-              {selectedCustomer && selectedCustomer.dueBalance > 0 && (
-                <span className="text-[11px] font-bold text-rose-600 bg-rose-50 px-2 py-1 rounded-lg border border-rose-200 whitespace-nowrap">
-                  Due: ৳{selectedCustomer.dueBalance.toFixed(0)}
-                </span>
+              {/* Recall Held Orders Pill */}
+              {heldSales.length > 0 && (
+                <button
+                  onClick={() => setIsHeldModalOpen(true)}
+                  className="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center space-x-1 cursor-pointer animate-pulse"
+                >
+                  <PlayCircle className="w-3.5 h-3.5" />
+                  <span>Held ({heldSales.length})</span>
+                </button>
               )}
             </div>
 
@@ -512,9 +550,14 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
                   <div key={`${item.medicine.id}-${item.batch.id}-${idx}`} className="pt-2 first:pt-0">
                     <div className="flex items-start justify-between">
                       <div className="flex-1 pr-2">
-                        <div className="flex items-center space-x-1.5">
+                        <div className="flex items-center space-x-1.5 flex-wrap">
                           <h4 className="font-bold text-slate-900 text-xs">{item.medicine.name}</h4>
                           <span className="text-[10px] text-slate-500">({item.medicine.strength})</span>
+                          {item.medicine.isColdChain && (
+                            <span className="text-[9px] px-1 bg-cyan-100 text-cyan-800 rounded font-bold">
+                              ❄ Cold Chain
+                            </span>
+                          )}
                         </div>
                         <p className="text-[10px] text-slate-400 italic">{item.medicine.genericName}</p>
 
@@ -645,6 +688,16 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
             {/* Action buttons */}
             <div className="flex space-x-2 pt-1">
               <button
+                onClick={handleHoldSale}
+                disabled={cart.length === 0}
+                title="Hold Bill (Park sale and serve another customer)"
+                className="py-2.5 px-3 bg-white hover:bg-slate-100 disabled:opacity-40 text-slate-700 font-semibold rounded-xl text-xs border border-slate-200 transition-all flex items-center gap-1 cursor-pointer"
+              >
+                <PauseCircle className="w-3.5 h-3.5 text-amber-500" />
+                <span>Hold</span>
+              </button>
+
+              <button
                 onClick={() => setCart([])}
                 disabled={cart.length === 0}
                 className="py-2.5 px-3 bg-white hover:bg-slate-100 disabled:opacity-40 text-slate-600 font-semibold rounded-xl text-xs border border-slate-200 transition-all cursor-pointer"
@@ -665,11 +718,56 @@ export const POSView: React.FC<POSViewProps> = ({ settings, cashierName }) => {
         </div>
       </div>
 
+      {/* HELD SALES MODAL (RECALL ORDER) */}
+      {isHeldModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden border border-slate-200">
+            <div className="px-5 py-4 bg-slate-900 text-white flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-sm">Parked / Held Customer Orders</h3>
+                <p className="text-xs text-slate-400">{heldSales.length} orders currently on hold</p>
+              </div>
+              <button onClick={() => setIsHeldModalOpen(false)} className="text-slate-400 hover:text-white cursor-pointer">
+                ✕
+              </button>
+            </div>
+
+            <div className="p-5 max-h-[60vh] overflow-y-auto space-y-3 text-xs">
+              {heldSales.map((h) => (
+                <div key={h.id} className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                  <div className="flex justify-between items-center font-bold">
+                    <span>{h.customer ? h.customer.name : 'Walk-in Customer'}</span>
+                    <span className="text-emerald-700">{settings.currency}{h.subtotal.toFixed(2)}</span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 flex justify-between">
+                    <span>Held at: {new Date(h.heldAt).toLocaleTimeString()}</span>
+                    <span>{h.items.length} items</span>
+                  </div>
+                  <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+                    <button
+                      onClick={() => db.removeHeldSale(h.id)}
+                      className="px-3 py-1 bg-white border border-slate-300 text-rose-600 rounded-lg font-semibold cursor-pointer"
+                    >
+                      Discard
+                    </button>
+                    <button
+                      onClick={() => handleRecallSale(h)}
+                      className="px-4 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold shadow cursor-pointer"
+                    >
+                      Resume Bill
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* CHECKOUT & PAYMENT MODAL */}
       {isCheckoutOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-200">
-            {/* Modal Header */}
             <div className="px-5 py-4 bg-slate-900 text-white flex items-center justify-between">
               <div>
                 <h3 className="font-bold text-sm">Payment & Checkout</h3>

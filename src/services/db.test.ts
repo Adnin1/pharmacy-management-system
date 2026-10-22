@@ -111,11 +111,112 @@ describe('Pharmacy Management System - Core Database Engine & FEFO Invariants', 
     expect(typeof backupJson).toBe('string');
 
     const parsed = JSON.parse(backupJson);
-    expect(parsed.version).toBe('1.0');
+    expect(parsed.version).toBe('2.0');
     expect(parsed.medicines).toBeDefined();
     expect(parsed.batches).toBeDefined();
 
     const restored = db.importFullBackup(backupJson);
     expect(restored).toBe(true);
+  });
+
+  it('supports Hold and Recall orders during active POS billing', () => {
+    const napa = db.getMedicineById('med-1')!;
+    const batch = db.getBatchesForMedicine('med-1')[0];
+
+    // Hold a sale
+    const held = db.holdCurrentSale({
+      cartItems: [
+        {
+          medicine: napa,
+          batch,
+          quantity: 2,
+          unitType: 'piece',
+          unitPrice: batch.sellingPrice,
+          costPrice: batch.purchasePrice,
+          discountPercent: 0,
+          total: 2 * batch.sellingPrice,
+        },
+      ],
+      discountAmount: 0,
+      vatPercent: 5,
+      note: 'Customer went to get prescription copy',
+    });
+
+    expect(held).toBeDefined();
+    expect(held.id).toMatch(/^held-/);
+
+    const activeHolds = db.getHeldSales();
+    expect(activeHolds.some((h) => h.id === held.id)).toBe(true);
+
+    // Remove / Resume held sale
+    db.removeHeldSale(held.id);
+    const updatedHolds = db.getHeldSales();
+    expect(updatedHolds.some((h) => h.id === held.id)).toBe(false);
+  });
+
+  it('imports bulk MedEx and Arogga pharmaceutical formulations with active batches', () => {
+    const initialCount = db.getMedicines().length;
+
+    const importedCount = db.importBulkMedicines([
+      {
+        name: 'Herbicough Test',
+        genericName: 'Adhatoda vasica Extract',
+        category: 'Herbal & Nutraceutical',
+        specialSegment: 'Herbal',
+        medicineType: 'Herbal',
+        drugClass: 'Ayurvedic Expectorant',
+        dosageForm: 'Syrup',
+        strength: '100 ml',
+        manufacturer: 'Square Herbal & Nutraceuticals',
+        unit: 'Bottle',
+        unitsPerBox: 1,
+        reorderLevel: 10,
+        rackLocation: 'Rack H-1',
+        isColdChain: false,
+        requiresPrescription: false,
+        isAntibiotic: false,
+        isNarcotic: false,
+        barcode: '89099887766',
+        sellingPrice: 85,
+        purchasePrice: 70,
+        quantityInStock: 50,
+      },
+      {
+        name: 'Trastuzumab Biosimilar',
+        genericName: 'Trastuzumab',
+        category: 'Oncology & Chemotherapy',
+        specialSegment: 'mAb',
+        medicineType: 'Biochemical',
+        drugClass: 'Monoclonal Antibody',
+        dosageForm: 'Injection',
+        strength: '440 mg',
+        manufacturer: 'Incepta Pharma',
+        unit: 'Vial',
+        unitsPerBox: 1,
+        reorderLevel: 2,
+        rackLocation: 'Cold Storage (2°C - 8°C)',
+        isColdChain: true,
+        requiresPrescription: true,
+        isAntibiotic: false,
+        isNarcotic: false,
+        barcode: '89011223344',
+        sellingPrice: 45000,
+        purchasePrice: 38000,
+        quantityInStock: 5,
+      },
+    ]);
+
+    expect(importedCount).toBe(2);
+    expect(db.getMedicines().length).toBe(initialCount + 2);
+
+    // Verify cold chain medicine batch exists and has specified price
+    const coldMed = db.getMedicines().find((m) => m.name === 'Trastuzumab Biosimilar');
+    expect(coldMed).toBeDefined();
+    expect(coldMed?.isColdChain).toBe(true);
+
+    const coldBatches = db.getBatchesForMedicine(coldMed!.id);
+    expect(coldBatches.length).toBe(1);
+    expect(coldBatches[0].sellingPrice).toBe(45000);
+    expect(coldBatches[0].quantityInStock).toBe(5);
   });
 });

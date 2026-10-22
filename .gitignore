@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# GitHub Actions workflows (requires specific workflow PAT scope)
+.github/
